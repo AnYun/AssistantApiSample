@@ -55,6 +55,8 @@ namespace AssistantApiFunctionCallSample
                     {
                         toolOutputs.Add(GetResolvedToolOutput(action));
                     }
+
+                    threadRun = await assistantClient.SubmitToolOutputsToRunAsync(threadRun, toolOutputs); // 提交工具輸出給執行
                 }
             }
             while (threadRun.Status == RunStatus.Queued || threadRun.Status == RunStatus.InProgress);
