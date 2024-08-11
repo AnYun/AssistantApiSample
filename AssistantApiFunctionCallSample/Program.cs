@@ -1,7 +1,8 @@
-﻿using Azure.AI.OpenAI.Assistants;
-using Azure;
+﻿using Azure;
 using System.Text.Json;
 using AssistantApiFunctionCallSample.Models;
+using Azure.AI.OpenAI;
+using OpenAI.Assistants;
 
 namespace AssistantApiFunctionCallSample
 {
@@ -9,78 +10,77 @@ namespace AssistantApiFunctionCallSample
     {
         static async Task Main(string[] args)
         {
-            var azureResourceUrl = "{Your Azure Resource Url}";
-            var azureApiKey = "{Your Azure Api Key}";
-            AssistantsClient client = new AssistantsClient(new Uri(azureResourceUrl), new AzureKeyCredential(azureApiKey));
+            var azureResourceUrl = "https://{your account}.openai.azure.com/";
+            var azureApiKey = "{Your Api Key}";
+            var deploymentName = "{Your Model Name}";
+            // Assistants is a beta API and subject to change; acknowledge its experimental status by suppressing the matching warning.
+#pragma warning disable OPENAI001
+            AssistantClient assistantClient = new AzureOpenAIClient(new Uri(azureResourceUrl), new AzureKeyCredential(azureApiKey)).GetAssistantClient();
 
             // 1. 建立助理
-            Response<Assistant> assistantResponse = await client.CreateAssistantAsync(
-            new AssistantCreationOptions("{Your Model Name}")
-            {
-                Name = "DEMO 助理",
-                Tools = {
-                    FunctionToolDefinitions.GetFoodPriceFuntionToolDefinition(),
-                    FunctionToolDefinitions.GetWeatherFuntionToolDefinition()
-                }
-            });
-            Assistant assistant = assistantResponse.Value;
+            Assistant assistant = await assistantClient.CreateAssistantAsync(
+                model: deploymentName,
+                new AssistantCreationOptions()
+                {
+                    Name = "DEMO 助理",
+                    Tools = {
+                        FunctionToolDefinitions.GetFoodPriceFuntionToolDefinition(),
+                        FunctionToolDefinitions.GetWeatherFuntionToolDefinition()
+                    }
+                });
 
             // 2. 建立聊天串
-            Response<AssistantThread> threadResponse = await client.CreateThreadAsync();
-            AssistantThread thread = threadResponse.Value;
-
-            Response<ThreadMessage> messageResponse = await client.CreateMessageAsync(thread.Id, MessageRole.User,
-                //"我想要點兩份牛排"
-                //"請問台北市的天氣?"
-                "請問 PS5 多少錢?"
-            );
-            ThreadMessage message = messageResponse.Value;
+            AssistantThread thread = await assistantClient.CreateThreadAsync(new ThreadCreationOptions()
+            {
+                InitialMessages = { new ThreadInitializationMessage(
+                [
+                    "我想要點兩份牛排"
+			        //"請問台北市的天氣?"
+			        //"請問 PS5 多少錢?"
+		        ]) }
+            });
 
             // 3. 運行助理回覆問題
-            Response<ThreadRun> runResponse = await client.CreateRunAsync(thread.Id, new CreateRunOptions(assistant.Id));
-            ThreadRun run = runResponse.Value;
+            ThreadRun threadRun = await assistantClient.CreateRunAsync(thread, assistant);
 
             do
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(500));
-                runResponse = await client.GetRunAsync(thread.Id, runResponse.Value.Id);
+                threadRun = await assistantClient.GetRunAsync(thread.Id, threadRun.Id);
 
-                if (runResponse.Value.Status == RunStatus.RequiresAction
-                    && runResponse.Value.RequiredAction is SubmitToolOutputsAction submitToolOutputsAction)
+                if (threadRun.Status == RunStatus.RequiresAction)
                 {
                     List<ToolOutput> toolOutputs = new();
-                    foreach (RequiredToolCall toolCall in submitToolOutputsAction.ToolCalls)
+                    foreach (RequiredAction action in threadRun.RequiredActions)
                     {
-                        toolOutputs.Add(GetResolvedToolOutput(toolCall));
+                        toolOutputs.Add(GetResolvedToolOutput(action));
                     }
-                    runResponse = await client.SubmitToolOutputsToRunAsync(runResponse.Value, toolOutputs);
                 }
             }
-            while (runResponse.Value.Status == RunStatus.Queued || runResponse.Value.Status == RunStatus.InProgress);
+            while (threadRun.Status == RunStatus.Queued || threadRun.Status == RunStatus.InProgress);
 
             // 4. 顯示出助理運行完後的聊天串
-            Response<PageableList<ThreadMessage>> afterRunMessagesResponse = await client.GetMessagesAsync(thread.Id);
-            IReadOnlyList<ThreadMessage> messages = afterRunMessagesResponse.Value.Data;
+            var threadMessages = assistantClient.GetMessagesAsync(thread);
 
-            foreach (ThreadMessage threadMessage in messages.OrderBy(x => x.CreatedAt))
+            await foreach (ThreadMessage threadMessage in threadMessages)
             {
                 Console.Write($"{threadMessage.CreatedAt:yyyy-MM-dd HH:mm:ss} - {threadMessage.Role,10}: ");
-                foreach (MessageContent contentItem in threadMessage.ContentItems)
+                foreach (MessageContent contentItem in threadMessage.Content)
                 {
-                    if (contentItem is MessageTextContent textItem)
+                    if (!string.IsNullOrEmpty(contentItem.Text))
                     {
-                        Console.Write(textItem.Text);
+                        Console.Write(contentItem.Text);
                     }
-                    else if (contentItem is MessageImageFileContent imageFileItem)
+                    else if (!string.IsNullOrEmpty(contentItem.ImageFileId))
                     {
-                        Console.Write($"<image from ID: {imageFileItem.FileId}");
+                        Console.Write($"<image from ID: {contentItem.ImageFileId}");
                     }
                     Console.WriteLine();
                 }
             }
 
-            var deleteThread = await client.DeleteThreadAsync(thread.Id);
-            var deleteAssistant = await client.DeleteAssistantAsync(assistant.Id);
+            var deleteThread = await assistantClient.DeleteThreadAsync(thread.Id);
+            var deleteAssistant = await assistantClient.DeleteAssistantAsync(assistant.Id);
 
             Console.WriteLine($"Delete Thread {thread.Id} {deleteThread.Value}");
             Console.WriteLine($"Delete Assistant {assistant.Id} {deleteAssistant.Value}");
@@ -90,23 +90,21 @@ namespace AssistantApiFunctionCallSample
         /// </summary>
         /// <param name="toolCall"></param>
         /// <returns></returns>
-        static ToolOutput GetResolvedToolOutput(RequiredToolCall toolCall)
+        static ToolOutput GetResolvedToolOutput(RequiredAction requiredAction)
         {
-            if (toolCall is RequiredFunctionToolCall functionToolCall)
+            switch (requiredAction.FunctionName)
             {
-                switch (functionToolCall.Name)
-                {
-                    case "CalFoodPrice":
-                        var foodInfo = JsonSerializer.Deserialize<FoodInfo>(functionToolCall.Arguments);
-                        var foodPrice = Functions.CalFoodPrice(foodInfo);
-                        return new ToolOutput(toolCall, $"您點了 {foodInfo.Count} 份 {foodInfo.Food} 總共 {foodPrice} 元");
-                    case "GetCurrentWeather":
-                        var weatherConfig = JsonSerializer.Deserialize<WeatherConfig>(functionToolCall.Arguments);
-                        return new ToolOutput(toolCall, Functions.GetCurrentWeather(weatherConfig));
-                    default:
-                        break;
-                }
+                case "CalFoodPrice":
+                    var foodInfo = JsonSerializer.Deserialize<FoodInfo>(requiredAction.FunctionArguments);
+                    var foodPrice = Functions.CalFoodPrice(foodInfo);
+                    return new ToolOutput(requiredAction.ToolCallId, $"您點了 {foodInfo.Count} 份 {foodInfo.Food} 總共 {foodPrice} 元");
+                case "GetCurrentWeather":
+                    var weatherConfig = JsonSerializer.Deserialize<WeatherConfig>(requiredAction.FunctionArguments);
+                    return new ToolOutput(requiredAction.ToolCallId, Functions.GetCurrentWeather(weatherConfig));
+                default:
+                    break;
             }
+
             return null;
         }
     }

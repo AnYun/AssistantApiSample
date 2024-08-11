@@ -35,7 +35,6 @@ namespace AssistantApiFunctionCallSample
         {
             switch (weatherConfig.Unit)
             {
-
                 case "華式":
                     return $"{weatherConfig.Location} 目前華式 86 度";
                 case "攝氏":
