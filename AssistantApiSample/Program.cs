@@ -1,5 +1,6 @@
-﻿using Azure.AI.OpenAI.Assistants;
-using Azure;
+﻿using Azure;
+using Azure.AI.OpenAI;
+using OpenAI.Assistants;
 
 namespace AssistantApiSample
 {
@@ -7,28 +8,33 @@ namespace AssistantApiSample
     {
         static async Task Main(string[] args)
         {
-            var azureResourceUrl = "{Your Azure Resource Url}";
-            var azureApiKey = "{Your Azure Api Key}";
-            AssistantsClient client = new AssistantsClient(new Uri(azureResourceUrl), new AzureKeyCredential(azureApiKey));
-
+            var azureResourceUrl = "https://{your account}.openai.azure.com/";
+            var azureApiKey = "{Your Api Key}";
+            var deploymentName = "{Your Model Name}";
+            // Assistants is a beta API and subject to change; acknowledge its experimental status by suppressing the matching warning.
+#pragma warning disable OPENAI001
+            AssistantClient client = new AzureOpenAIClient(new Uri(azureResourceUrl), new AzureKeyCredential(azureApiKey)).GetAssistantClient();
+            
             // 1. 建立助理
-            Response<Assistant> assistantResponse = await client.CreateAssistantAsync(
-            new AssistantCreationOptions("{Your Model Name}")
-            {
-                Name = "DEMO 助理",
-                Instructions = "你是 Azure 專家，會回覆關於 Azure 的問題。"
-            });
-            Assistant assistant = assistantResponse.Value;
+            Assistant assistant = await client.CreateAssistantAsync(
+                model: deploymentName,
+                new AssistantCreationOptions()
+                {
+                    Name = "DEMO 助理",
+                    Instructions = "你是 Azure 專家，會回覆關於 Azure 的問題。"
+                });
 
             // 2. 建立聊天串
-            Response<AssistantThread> threadResponse = await client.CreateThreadAsync();
-            AssistantThread thread = threadResponse.Value;
+            AssistantThread thread = await client.CreateThreadAsync();
 
-            Response<ThreadMessage> messageResponse = await client.CreateMessageAsync(thread.Id, MessageRole.User, "如何建立一台 VM ?");
-            ThreadMessage message = messageResponse.Value;
+            var messageResponse = await client.CreateMessageAsync(thread,
+                [
+                    "如何建立一台 VM?"
+                ]
+            );
 
             // 3. 運行助理回覆問題
-            Response<ThreadRun> runResponse = await client.CreateRunAsync(thread.Id, new CreateRunOptions(assistant.Id));
+            var runResponse = await client.CreateRunAsync(thread, assistant);
             ThreadRun run = runResponse.Value;
 
             do
@@ -39,21 +45,20 @@ namespace AssistantApiSample
             while (runResponse.Value.Status == RunStatus.Queued || runResponse.Value.Status == RunStatus.InProgress);
 
             // 4. 顯示出助理運行完後的聊天串
-            Response<PageableList<ThreadMessage>> afterRunMessagesResponse = await client.GetMessagesAsync(thread.Id);
-            IReadOnlyList<ThreadMessage> messages = afterRunMessagesResponse.Value.Data;
+            var afterRunMessagesResponse = client.GetMessagesAsync(thread);
 
-            foreach (ThreadMessage threadMessage in messages.OrderBy(x => x.CreatedAt))
+            await foreach (ThreadMessage threadMessage in afterRunMessagesResponse)
             {
-                Console.Write($"{threadMessage.CreatedAt:yyyy-MM-dd HH:mm:ss} - {threadMessage.Role,10}: ");
-                foreach (MessageContent contentItem in threadMessage.ContentItems)
+                Console.WriteLine($"{threadMessage.CreatedAt:yyyy-MM-dd HH:mm:ss} - {threadMessage.Role,10}: ");
+                foreach (MessageContent contentItem in threadMessage.Content)
                 {
-                    if (contentItem is MessageTextContent textItem)
+                    if (!string.IsNullOrEmpty(contentItem.Text))
                     {
-                        Console.Write(textItem.Text);
+                        Console.Write(contentItem.Text);
                     }
-                    else if (contentItem is MessageImageFileContent imageFileItem)
+                    else if (!string.IsNullOrEmpty(contentItem.ImageFileId))
                     {
-                        Console.Write($"<image from ID: {imageFileItem.FileId}");
+                        Console.Write($"<image from ID: {contentItem.ImageFileId}");
                     }
                     Console.WriteLine();
                 }
